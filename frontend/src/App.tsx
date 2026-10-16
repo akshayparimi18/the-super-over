@@ -441,7 +441,7 @@ export default function App() {
 
             <div className="room-meta">
               <span className="players-count">{playersConnected}/2 PLAYERS</span>
-              <span className="role-badge">
+              <span className={`role-badge ${role === "bowler" ? "role-bowler" : "role-batsman"}`}>
                 {role === "bowler" ? "🎯 BOWLER" : "🏏 BATSMAN"}
               </span>
               <button className="text-button" onClick={leaveRoom}>
@@ -480,18 +480,17 @@ export default function App() {
           </section>
 
           {isInningsBreak ? (
-            <section className="panel" style={{ textAlign: "center" }}>
+            <section className="panel innings-break-panel">
               <p className="section-kicker">INNINGS BREAK</p>
               <h2>Innings 1 Over!</h2>
-              <div
-                className="result-highlight"
-                style={{ fontSize: "2.5rem", margin: "1.25rem 0" }}
-              >
+              <div className="result-highlight target-highlight">
                 🎯 TARGET: {score.target_score} RUNS
               </div>
-              <p className="muted" style={{ fontSize: "1.05rem", marginBottom: "1rem" }}>
+              <p className="muted innings-role-desc">
                 Roles swapped! You are now the{" "}
-                <strong>{role === "bowler" ? "🎯 BOWLER" : "🏏 BATSMAN"}</strong>.
+                <span className={`role-badge inline-badge ${role === "bowler" ? "role-bowler" : "role-batsman"}`}>
+                  {role === "bowler" ? "🎯 BOWLER" : "🏏 BATSMAN"}
+                </span>
               </p>
               <div className="waiting-banner">
                 <span className="pulse-dot" />
@@ -499,13 +498,10 @@ export default function App() {
               </div>
             </section>
           ) : score.winner ? (
-            <section className="panel" style={{ textAlign: "center" }}>
+            <section className="panel match-over-panel">
               <p className="section-kicker">MATCH OVER</p>
               <h2>The Super Over is complete!</h2>
-              <div
-                className="result-highlight"
-                style={{ fontSize: "2.5rem", margin: "1.25rem 0" }}
-              >
+              <div className="result-highlight winner-highlight">
                 {score.winner === "Tie" ? "🤝 MATCH TIED!" : `🏆 ${score.winner} WINS!`}
               </div>
               <p className="muted">
@@ -571,7 +567,7 @@ export default function App() {
           )}
 
           {result && (
-            <section className="result-panel panel">
+            <section className={`result-panel panel ${result.wicket ? "wicket-panel" : ""}`}>
               <p className="section-kicker">
                 ROUND {result.round_number} · RESULT
               </p>
@@ -589,7 +585,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="result-highlight">
+              <div className={`result-highlight ${result.wicket ? "wicket" : ""}`}>
                 {result.wicket
                   ? "WICKET!"
                   : result.wide
