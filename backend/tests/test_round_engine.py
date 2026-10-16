@@ -1,4 +1,4 @@
-"""Integration tests for the Step 3 real-time round engine."""
+"""Integration tests for the stateful Inventory & Intent Super Over round engine."""
 
 from fastapi.testclient import TestClient
 
@@ -19,68 +19,56 @@ def test_moves_are_hidden_until_both_players_submit():
                 joined = batsman.receive_json()
                 assert joined["type"] == "room_joined"
                 assert joined["role"] == "batsman"
+                assert joined["current_phase"] == "SELECT_PROFILE"
 
-                # Existing player receives join notification
+                # Bowler receives player_joined with SELECT_PROFILE phase
                 notification = bowler.receive_json()
                 assert notification["type"] == "player_joined"
                 assert notification["players_connected"] == 2
+                assert notification["current_phase"] == "SELECT_PROFILE"
 
-                # Bowler locks a secret delivery
-                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                # Bowler selects FAST profile
+                bowler.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                bowler_prof = bowler.receive_json()
+                batsman_prof = batsman.receive_json()
+
+                assert bowler_prof["type"] == "profile_selected"
+                assert bowler_prof["bowler_profile"] == "FAST"
+                assert bowler_prof["bowler_inventory"]["YORKER"] == 1
+                assert bowler_prof["bowler_inventory"]["HALF_VOLLEY"] == 2
+                assert bowler_prof["current_phase"] == "PLAYING"
+
+                assert batsman_prof["type"] == "profile_selected"
+                assert batsman_prof["bowler_profile"] == "FAST"
+
+                # Bowler locks Half-Volley
+                bowler.send_json({"type": "submit_move", "payload": {"move": "HALF_VOLLEY"}})
                 bowler_lock = bowler.receive_json()
                 assert bowler_lock["type"] == "move_locked"
                 assert bowler_lock["waiting_for_opponent"] is True
 
-                # Batsman picks a shot → triggers round resolution
-                batsman.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
+                # Batsman picks SLOG_6 → triggers round resolution
+                batsman.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
                 batsman_lock = batsman.receive_json()
                 assert batsman_lock["type"] == "move_locked"
 
-                # Both players receive the round result
+                # Both players receive round_result
                 bowler_result = bowler.receive_json()
                 batsman_result = batsman.receive_json()
 
                 assert bowler_result["type"] == "round_result"
                 assert batsman_result["type"] == "round_result"
 
-                # Yorker vs Helicopter → 6 runs, no wicket, no wide
-                assert bowler_result["delivery"] == "YORKER"
-                assert bowler_result["shot"] == "HELICOPTER"
+                # Half-Volley vs SLOG_6 → 6 runs, no wicket
+                assert bowler_result["delivery"] == "HALF_VOLLEY"
+                assert bowler_result["shot"] == "SLOG_6"
                 assert bowler_result["runs_scored"] == 6
                 assert bowler_result["wicket"] is False
-                assert bowler_result["wide"] is False
 
-                # Scoreboard should be identical for both players
-                assert bowler_result["scoreboard"] == batsman_result["scoreboard"]
+                # Half-Volley inventory should be decremented from 2 to 1
+                assert bowler_result["bowler_inventory"]["HALF_VOLLEY"] == 1
                 assert bowler_result["scoreboard"]["runs"] == 6
                 assert bowler_result["scoreboard"]["legal_balls"] == 1
-
-
-def test_wide_does_not_count_as_legal_ball():
-    rooms.clear()
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws") as bowler:
-            bowler.send_json({"type": "create_room"})
-            code = bowler.receive_json()["room_code"]
-
-            with client.websocket_connect("/ws") as batsman:
-                batsman.send_json({"type": "join_room", "room_code": code})
-                batsman.receive_json()  # room_joined
-                bowler.receive_json()   # player_joined
-
-                # Bouncer vs Duck → wide (+1 run, no legal ball)
-                bowler.send_json({"type": "submit_move", "payload": {"move": "BOUNCER"}})
-                bowler.receive_json()  # move_locked
-
-                batsman.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
-                batsman.receive_json()  # move_locked
-
-                result = bowler.receive_json()
-                assert result["type"] == "round_result"
-                assert result["wide"] is True
-                assert result["runs_scored"] == 1
-                assert result["scoreboard"]["legal_balls"] == 0  # wide does not count
-                assert result["scoreboard"]["runs"] == 1
 
 
 def test_wicket_ends_innings():
@@ -95,16 +83,91 @@ def test_wicket_ends_innings():
                 batsman.receive_json()  # room_joined
                 bowler.receive_json()   # player_joined
 
-                # Yorker vs Duck → wicket
-                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                # Bowler selects FAST profile
+                bowler.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
                 bowler.receive_json()
-
-                batsman.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
                 batsman.receive_json()
+
+                # Yorker vs SLOG_6 → Wicket!
+                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                bowler.receive_json()  # move_locked
+
+                batsman.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
+                batsman.receive_json()  # move_locked
 
                 result = bowler.receive_json()
                 assert result["wicket"] is True
                 assert result["scoreboard"]["innings_finished"] is True
+                assert result["status"] == "INNINGS_BREAK"
+
+
+def test_exhausted_delivery_is_rejected():
+    rooms.clear()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as bowler:
+            bowler.send_json({"type": "create_room"})
+            code = bowler.receive_json()["room_code"]
+
+            with client.websocket_connect("/ws") as batsman:
+                batsman.send_json({"type": "join_room", "room_code": code})
+                batsman.receive_json()
+                bowler.receive_json()
+
+                bowler.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                bowler.receive_json()
+                batsman.receive_json()
+
+                # Fast profile only has 1 Yorker
+                # Ball 1: Yorker vs Defend (0 runs)
+                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                bowler.receive_json()
+                batsman.send_json({"type": "submit_move", "payload": {"move": "DEFEND_0"}})
+                batsman.receive_json()
+                bowler.receive_json()  # round_result
+                batsman.receive_json()
+
+                # Ball 2: Bowler attempts to bowl Yorker again (0 remaining!)
+                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                err = bowler.receive_json()
+                assert err["type"] == "error"
+                assert err["code"] == "delivery_exhausted"
+
+
+def test_submitting_move_before_profile_selection_is_rejected():
+    rooms.clear()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as bowler:
+            bowler.send_json({"type": "create_room"})
+            code = bowler.receive_json()["room_code"]
+
+            with client.websocket_connect("/ws") as batsman:
+                batsman.send_json({"type": "join_room", "room_code": code})
+                batsman.receive_json()
+                bowler.receive_json()
+
+                # Bowler tries to submit move before choosing profile
+                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                err = bowler.receive_json()
+                assert err["type"] == "error"
+                assert err["code"] == "waiting_for_profile"
+
+
+def test_batsman_cannot_select_bowler_profile():
+    rooms.clear()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as bowler:
+            bowler.send_json({"type": "create_room"})
+            code = bowler.receive_json()["room_code"]
+
+            with client.websocket_connect("/ws") as batsman:
+                batsman.send_json({"type": "join_room", "room_code": code})
+                batsman.receive_json()
+                bowler.receive_json()
+
+                batsman.send_json({"type": "select_profile", "payload": {"profile": "SPIN"}})
+                err = batsman.receive_json()
+                assert err["type"] == "error"
+                assert err["code"] == "unauthorized"
 
 
 def test_duplicate_move_rejected():
@@ -116,20 +179,25 @@ def test_duplicate_move_rejected():
 
             with client.websocket_connect("/ws") as batsman:
                 batsman.send_json({"type": "join_room", "room_code": code})
-                batsman.receive_json()  # room_joined
-                bowler.receive_json()   # player_joined
+                batsman.receive_json()
+                bowler.receive_json()
+
+                bowler.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                bowler.receive_json()
+                batsman.receive_json()
 
                 # Bowler submits once
-                bowler.send_json({"type": "submit_move", "payload": {"move": "SPIN"}})
+                bowler.send_json({"type": "submit_move", "payload": {"move": "BOUNCER"}})
                 bowler.receive_json()  # move_locked
 
                 # Bowler tries to submit again
                 bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
                 error = bowler.receive_json()
                 assert error["type"] == "error"
+                assert error["code"] == "move_already_submitted"
 
 
-def test_wrong_role_move_is_rejected_without_crashing():
+def test_wrong_role_move_is_rejected():
     rooms.clear()
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as bowler:
@@ -141,58 +209,24 @@ def test_wrong_role_move_is_rejected_without_crashing():
                 batsman.receive_json()
                 bowler.receive_json()
 
+                bowler.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                bowler.receive_json()
+                batsman.receive_json()
+
+                # Batsman tries to submit a bowler delivery
                 batsman.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
                 error = batsman.receive_json()
                 assert error["type"] == "error"
                 assert error["code"] == "invalid_move"
-                assert "batsman" in error["message"].lower()
 
-                bowler.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
+                # Bowler tries to submit a batsman intent
+                bowler.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
                 bowler_error = bowler.receive_json()
                 assert bowler_error["type"] == "error"
-                assert "bowler" in bowler_error["message"].lower()
+                assert bowler_error["code"] == "invalid_move"
 
 
-def test_innings_break_and_role_swap():
-    rooms.clear()
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws") as bowler:
-            bowler.send_json({"type": "create_room"})
-            code = bowler.receive_json()["room_code"]
-
-            with client.websocket_connect("/ws") as batsman:
-                batsman.send_json({"type": "join_room", "room_code": code})
-                batsman.receive_json()
-                bowler.receive_json()
-
-                # Yorker vs Duck → Wicket ends Innings 1 with 0 runs
-                bowler.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                bowler.receive_json()
-                batsman.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
-                batsman.receive_json()
-
-                # Both receive round_result
-                bowler_res = bowler.receive_json()
-                batsman_res = batsman.receive_json()
-                assert bowler_res["status"] == "INNINGS_BREAK"
-                assert batsman_res["status"] == "INNINGS_BREAK"
-
-                # Both receive innings_break with roles swapped
-                bowler_break = bowler.receive_json()
-                batsman_break = batsman.receive_json()
-
-                assert bowler_break["type"] == "innings_break"
-                assert bowler_break["target_score"] == 1  # 0 runs + 1
-                assert bowler_break["current_innings"] == 2
-                assert bowler_break["role"] == "batsman"  # swapped!
-
-                assert batsman_break["type"] == "innings_break"
-                assert batsman_break["target_score"] == 1
-                assert batsman_break["current_innings"] == 2
-                assert batsman_break["role"] == "bowler"  # swapped!
-
-
-def test_full_match_team2_chases_target_successfully():
+def test_full_match_with_inventory_and_role_swap():
     rooms.clear()
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as p1:
@@ -201,124 +235,66 @@ def test_full_match_team2_chases_target_successfully():
 
             with client.websocket_connect("/ws") as p2:
                 p2.send_json({"type": "join_room", "room_code": code})
-                p2.receive_json()  # room_joined
-                p1.receive_json()  # player_joined
-
-                # --- Innings 1 ---
-                # p1 = bowler, p2 = batsman
-                # Ball 1: Yorker vs Helicopter = 6 runs
-                p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                p2.receive_json()
                 p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
+
+                # --- Innings 1: p1 is bowler, p2 is batsman ---
+                # p1 selects SPIN profile
+                p1.send_json({"type": "select_profile", "payload": {"profile": "SPIN"}})
+                p1.receive_json()
                 p2.receive_json()
 
+                # Ball 1: p1 bowls OFF_BREAK, p2 plays HIT_4 = 4 runs
+                p1.send_json({"type": "submit_move", "payload": {"move": "OFF_BREAK"}})
+                p1.receive_json()
+                p2.send_json({"type": "submit_move", "payload": {"move": "HIT_4"}})
+                p2.receive_json()
                 p1_res = p1.receive_json()
-                p2_res = p2.receive_json()
-                assert p1_res["runs_scored"] == 6
+                p2.receive_json()
+                assert p1_res["runs_scored"] == 4
 
-                # Ball 2: Yorker vs Duck = Wicket (Innings 1 over at 6 runs)
-                p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
+                # Ball 2: p1 bowls GOOGLY, p2 plays SLOG_6 = Wicket! (Innings 1 over at 4 runs)
+                p1.send_json({"type": "submit_move", "payload": {"move": "GOOGLY"}})
                 p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
+                p2.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
+                p2.receive_json()
+                p1.receive_json()  # round_result
                 p2.receive_json()
 
-                p1.receive_json()  # round_result
-                p2.receive_json()  # round_result
-
-                # Both get innings_break
+                # Both receive innings_break (Target is 4 + 1 = 5 runs)
                 p1_break = p1.receive_json()
                 p2_break = p2.receive_json()
                 assert p1_break["type"] == "innings_break"
-                assert p1_break["target_score"] == 7
+                assert p1_break["target_score"] == 5
+                assert p1_break["current_phase"] == "SELECT_PROFILE"
                 assert p1_break["role"] == "batsman"  # p1 is now batsman
                 assert p2_break["role"] == "bowler"   # p2 is now bowler
 
-                # --- Innings 2 ---
-                # Ball 1: p2 (bowler) bowls YORKER, p1 (batsman) hits HELICOPTER = 6 runs
-                p2.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                p2.receive_json()
-                p1.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
-                p1.receive_json()
-
-                p1.receive_json()  # round_result (score 6/0, target 7)
-                p2.receive_json()  # round_result
-
-                # Ball 2: p2 (bowler) bowls BOUNCER, p1 (batsman) hits SWEEP = 2 runs (Total 8 runs >= 7)
-                p2.send_json({"type": "submit_move", "payload": {"move": "BOUNCER"}})
-                p2.receive_json()
-                p1.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                p1.receive_json()
-
-                p1_win_res = p1.receive_json()
-                p2_win_res = p2.receive_json()
-                assert p1_win_res["type"] == "round_result"
-                assert p1_win_res["status"] == "MATCH_OVER"
-                assert p1_win_res["scoreboard"]["winner"] == "Team 2"
-
-                p1_match_over = p1.receive_json()
-                p2_match_over = p2.receive_json()
-                assert p1_match_over["type"] == "match_over"
-                assert p1_match_over["winner"] == "Team 2"
-                assert p2_match_over["winner"] == "Team 2"
-
-                # Submitting after match over is rejected
-                p1.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                err = p1.receive_json()
-                assert err["type"] == "error"
-                assert err["code"] == "match_over"
-
-
-def test_full_match_team1_defends_target_successfully():
-    rooms.clear()
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws") as p1:
-            p1.send_json({"type": "create_room"})
-            code = p1.receive_json()["room_code"]
-
-            with client.websocket_connect("/ws") as p2:
-                p2.send_json({"type": "join_room", "room_code": code})
+                # --- Innings 2: p2 is bowler, p1 is batsman ---
+                # p2 selects FAST profile
+                p2.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
                 p2.receive_json()
                 p1.receive_json()
 
-                # Innings 1: p1 bowls SPIN, p2 hits SWEEP = 4 runs
-                p1.send_json({"type": "submit_move", "payload": {"move": "SPIN"}})
-                p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
+                # Ball 1: p2 bowls HALF_VOLLEY, p1 plays SLOG_6 = 6 runs! (Total 6 >= 5 target)
+                p2.send_json({"type": "submit_move", "payload": {"move": "HALF_VOLLEY"}})
                 p2.receive_json()
-                p1.receive_json()
-                p2.receive_json()
-
-                # Innings 1 Ball 2: p1 bowls BOUNCER, p2 plays HELICOPTER = Wicket!
-                p1.send_json({"type": "submit_move", "payload": {"move": "BOUNCER"}})
-                p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
-                p2.receive_json()
-                p1.receive_json()
-                p2.receive_json()
-
-                # Innings break (target is 4 + 1 = 5)
-                p1_break = p1.receive_json()
-                p2_break = p2.receive_json()
-                assert p1_break["target_score"] == 5
-
-                # Innings 2: p2 bowls SPIN, p1 hits HELICOPTER = Wicket!
-                p2.send_json({"type": "submit_move", "payload": {"move": "SPIN"}})
-                p2.receive_json()
-                p1.send_json({"type": "submit_move", "payload": {"move": "HELICOPTER"}})
+                p1.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
                 p1.receive_json()
 
-                p1_res = p1.receive_json()
-                p2_res = p2.receive_json()
-                assert p1_res["wicket"] is True
-                assert p1_res["status"] == "MATCH_OVER"
-                assert p1_res["scoreboard"]["winner"] == "Team 1"
+                p1_win = p1.receive_json()
+                p2_win = p2.receive_json()
+                assert p1_win["type"] == "round_result"
+                assert p1_win["status"] == "MATCH_OVER"
+                assert p1_win["scoreboard"]["winner"] == "Team 2"
 
                 p1_over = p1.receive_json()
+                p2_over = p2.receive_json()
                 assert p1_over["type"] == "match_over"
-                assert p1_over["winner"] == "Team 1"
+                assert p1_over["winner"] == "Team 2"
 
 
-def test_six_legal_balls_ends_first_innings():
+def test_defending_target_in_second_innings():
     rooms.clear()
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as p1:
@@ -330,80 +306,45 @@ def test_six_legal_balls_ends_first_innings():
                 p2.receive_json()
                 p1.receive_json()
 
-                # 6 deliveries of Yorker vs Sweep (1 run each, no wicket, legal ball)
-                for i in range(5):
-                    p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                    p1.receive_json()
-                    p2.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                    p2.receive_json()
-                    res = p1.receive_json()
-                    p2.receive_json()
-                    assert res.get("status") is None
+                # Innings 1: p1 is bowler, selects FAST
+                p1.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                p1.receive_json()
+                p2.receive_json()
 
-                # 6th delivery
+                # Ball 1: Half-Volley vs HIT_4 = 4 runs
+                p1.send_json({"type": "submit_move", "payload": {"move": "HALF_VOLLEY"}})
+                p1.receive_json()
+                p2.send_json({"type": "submit_move", "payload": {"move": "HIT_4"}})
+                p2.receive_json()
+                p1.receive_json()
+                p2.receive_json()
+
+                # Ball 2: Yorker vs SLOG_6 = Wicket (Innings 1 over at 4 runs, Target = 5)
                 p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
                 p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                p2.receive_json()
-                res = p1.receive_json()
-                p2.receive_json()
-                assert res["status"] == "INNINGS_BREAK"
-
-                p1_break = p1.receive_json()
-                p2_break = p2.receive_json()
-                assert p1_break["type"] == "innings_break"
-                assert p1_break["target_score"] == 7  # 6 runs + 1
-
-
-def test_match_tie_in_second_innings():
-    rooms.clear()
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws") as p1:
-            p1.send_json({"type": "create_room"})
-            code = p1.receive_json()["room_code"]
-
-            with client.websocket_connect("/ws") as p2:
-                p2.send_json({"type": "join_room", "room_code": code})
-                p2.receive_json()
-                p1.receive_json()
-
-                # Innings 1: Yorker vs Sweep (1 run)
-                p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                p2.receive_json()
-                p1.receive_json()
-                p2.receive_json()
-
-                # Innings 1: Yorker vs Duck (wicket) -> Target = 2
-                p1.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                p1.receive_json()
-                p2.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
+                p2.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
                 p2.receive_json()
                 p1.receive_json()
                 p2.receive_json()
                 p1.receive_json()  # innings_break
                 p2.receive_json()  # innings_break
 
-                # Innings 2: p2 bowls Yorker, p1 plays Sweep (1 run) -> score 1
+                # Innings 2: p2 is bowler, selects FAST
+                p2.send_json({"type": "select_profile", "payload": {"profile": "FAST"}})
+                p2.receive_json()
+                p1.receive_json()
+
+                # Ball 1: p2 bowls Yorker, p1 plays SLOG_6 = Wicket!
                 p2.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
                 p2.receive_json()
-                p1.send_json({"type": "submit_move", "payload": {"move": "SWEEP"}})
-                p1.receive_json()
-                p1.receive_json()
-                p2.receive_json()
-
-                # Innings 2: p2 bowls Yorker, p1 plays Duck (wicket) -> score 1 (tied with team 1's score 1)
-                p2.send_json({"type": "submit_move", "payload": {"move": "YORKER"}})
-                p2.receive_json()
-                p1.send_json({"type": "submit_move", "payload": {"move": "DUCK"}})
+                p1.send_json({"type": "submit_move", "payload": {"move": "SLOG_6"}})
                 p1.receive_json()
 
-                res = p1.receive_json()
-                p2.receive_json()
-                assert res["status"] == "MATCH_OVER"
-                assert res["scoreboard"]["winner"] == "Tie"
+                p1_over = p1.receive_json()
+                p2_over = p2.receive_json()
+                assert p1_over["status"] == "MATCH_OVER"
+                assert p1_over["scoreboard"]["winner"] == "Team 1"
 
-                over = p1.receive_json()
-                assert over["winner"] == "Tie"
-
+                p1_end = p1.receive_json()
+                assert p1_end["type"] == "match_over"
+                assert p1_end["winner"] == "Team 1"

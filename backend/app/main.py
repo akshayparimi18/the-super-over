@@ -4,8 +4,16 @@ import string
 from dataclasses import dataclass, field
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
-from app.rules import Delivery, Shot, check_innings_state, resolve_matchup
-from app.schemas import ClientMessage, GameState, MovePayload
+from app.rules import (
+    BatsmanIntent,
+    BowlerProfile,
+    DeliveryType,
+    check_innings_state,
+    consume_delivery,
+    get_initial_inventory,
+    resolve_matchup,
+)
+from app.schemas import ClientMessage, GameState, MovePayload, ProfilePayload
 
 app = FastAPI(title="The Super Over API")
 
@@ -13,8 +21,8 @@ ROOM_CODE_LENGTH = 6
 LEGAL_BALLS_PER_INNINGS = 6
 WICKETS_PER_INNINGS = 1
 ALPHABET = string.ascii_uppercase + string.digits
-BOWLER_MOVES = {delivery.value for delivery in Delivery}
-BATSMAN_MOVES = {shot.value for shot in Shot}
+ALL_DELIVERY_TYPES = {d.value for d in DeliveryType}
+BATSMAN_INTENTS = {intent.value for intent in BatsmanIntent}
 
 
 @dataclass
@@ -38,6 +46,9 @@ class Room:
     current_innings: int = 1
     target_score: int | None = None
     winner: str | None = None
+    current_phase: str = "WAITING_FOR_PLAYERS"
+    bowler_profile: str | None = None
+    bowler_inventory: dict[str, int] = field(default_factory=dict)
 
 
 rooms: dict[str, Room] = {}
@@ -81,6 +92,9 @@ def public_score(room: Room) -> dict:
         "current_innings": room.current_innings,
         "target_score": room.target_score,
         "winner": room.winner,
+        "current_phase": room.current_phase,
+        "bowler_profile": room.bowler_profile,
+        "bowler_inventory": dict(room.bowler_inventory),
     }
 
 
@@ -105,7 +119,6 @@ async def broadcast(room: Room, data: dict) -> None:
         try:
             await send_json(player.websocket, data)
         except (RuntimeError, WebSocketDisconnect):
-            # A failed send must not undo an already resolved round.
             pass
 
 
@@ -123,7 +136,6 @@ async def remove_player(room: Room, player_id: str) -> None:
         if not room.players:
             should_delete = True
         else:
-            # This MVP closes a room when either player leaves.
             remaining = list(room.players.values())
             room.players.clear()
             room.moves.clear()
@@ -177,6 +189,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 )
                 async with room.lock:
                     room.players[player_id] = player
+                    room.current_phase = "WAITING_FOR_PLAYERS"
 
                 await send_json(
                     websocket,
@@ -185,6 +198,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "room_code": room.code,
                         "role": "bowler",
                         "players_connected": 1,
+                        "current_phase": room.current_phase,
                         "scoreboard": public_score(room),
                     },
                 )
@@ -227,6 +241,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     room.players[player_id] = player
                     current_room_code = room.code
                     players_connected = len(room.players)
+                    if players_connected == 2:
+                        room.current_phase = "SELECT_PROFILE"
 
                 await send_json(
                     websocket,
@@ -235,11 +251,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "room_code": room.code,
                         "role": "batsman",
                         "players_connected": players_connected,
+                        "current_phase": room.current_phase,
                         "scoreboard": public_score(room),
                     },
                 )
 
-                # Notify only the existing player (Fix B)
+                # Notify existing player
                 for existing_player in list(room.players.values()):
                     if existing_player.player_id == player_id:
                         continue
@@ -249,10 +266,65 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             {
                                 "type": "player_joined",
                                 "players_connected": players_connected,
+                                "current_phase": room.current_phase,
+                                "scoreboard": public_score(room),
                             },
                         )
                     except (RuntimeError, WebSocketDisconnect):
                         pass
+
+            elif msg.type == "select_profile":
+                if not current_room_code:
+                    continue
+
+                async with rooms_lock:
+                    room = rooms.get(current_room_code)
+                if not room:
+                    continue
+
+                async with room.lock:
+                    player = room.players.get(player_id)
+                    if not player:
+                        continue
+                    if player.role != "bowler":
+                        await send_error(
+                            websocket,
+                            "unauthorized",
+                            "Only the bowler can select the bowler profile.",
+                        )
+                        continue
+                    if room.current_phase != "SELECT_PROFILE":
+                        await send_error(
+                            websocket,
+                            "invalid_phase",
+                            f"Cannot select profile in phase '{room.current_phase}'.",
+                        )
+                        continue
+
+                    raw_profile = str(msg.payload.get("profile") or "").upper()
+                    try:
+                        profile = BowlerProfile(raw_profile)
+                    except ValueError:
+                        await send_error(
+                            websocket,
+                            "invalid_profile",
+                            f"Invalid bowler profile: '{raw_profile}'. Choose FAST or SPIN.",
+                        )
+                        continue
+
+                    room.bowler_profile = profile.value
+                    room.bowler_inventory = get_initial_inventory(profile)
+                    room.current_phase = "PLAYING"
+
+                    broadcast_data = {
+                        "type": "profile_selected",
+                        "bowler_profile": room.bowler_profile,
+                        "bowler_inventory": dict(room.bowler_inventory),
+                        "current_phase": room.current_phase,
+                        "scoreboard": public_score(room),
+                    }
+
+                await broadcast(room, broadcast_data)
 
             elif msg.type == "submit_move":
                 if not current_room_code:
@@ -266,18 +338,28 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 try:
                     payload = MovePayload(**msg.payload)
                 except ValidationError:
-                    await send_error(websocket, "invalid_move", "Invalid move.")
+                    await send_error(websocket, "invalid_move", "Invalid move format.")
                     continue
 
+                move_name = str(payload.move).upper()
                 result_data = None
                 innings_status = None
+
                 async with room.lock:
                     player = room.players.get(player_id)
                     if not player or len(room.players) != 2:
                         continue
 
-                    if room.winner is not None:
+                    if room.winner is not None or room.current_phase == "MATCH_OVER":
                         await send_error(websocket, "match_over", "Match is finished.")
+                        continue
+
+                    if room.current_phase == "SELECT_PROFILE":
+                        await send_error(
+                            websocket,
+                            "waiting_for_profile",
+                            "Bowler must select profile before submitting moves.",
+                        )
                         continue
 
                     if public_score(room)["innings_finished"] and (
@@ -286,20 +368,32 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await send_error(websocket, "innings_finished", "Innings finished.")
                         continue
 
-                    if player.role == "bowler" and payload.move not in BOWLER_MOVES:
-                        await send_error(
-                            websocket,
-                            "invalid_move",
-                            "Invalid move for bowler",
-                        )
-                        continue
-                    if player.role == "batsman" and payload.move not in BATSMAN_MOVES:
-                        await send_error(
-                            websocket,
-                            "invalid_move",
-                            "Invalid move for batsman",
-                        )
-                        continue
+                    # Validate Bowler Move
+                    if player.role == "bowler":
+                        if move_name not in room.bowler_inventory:
+                            await send_error(
+                                websocket,
+                                "invalid_move",
+                                f"Invalid delivery '{move_name}' for profile {room.bowler_profile}.",
+                            )
+                            continue
+                        if room.bowler_inventory.get(move_name, 0) <= 0:
+                            await send_error(
+                                websocket,
+                                "delivery_exhausted",
+                                f"No '{move_name}' deliveries remaining in inventory.",
+                            )
+                            continue
+
+                    # Validate Batsman Move
+                    if player.role == "batsman":
+                        if move_name not in BATSMAN_INTENTS:
+                            await send_error(
+                                websocket,
+                                "invalid_move",
+                                f"Invalid move for batsman: '{move_name}'. Must be a valid intent.",
+                            )
+                            continue
 
                     if player_id in room.moves:
                         await send_error(
@@ -309,7 +403,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         )
                         continue
 
-                    room.moves[player_id] = payload.move
+                    room.moves[player_id] = move_name
 
                     await send_json(
                         websocket,
@@ -335,10 +429,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         shot = room.moves[batsman_id]
                         room.moves.clear()
 
+                        # Consume delivery from bowler inventory
                         try:
-                            outcome = resolve_matchup(Delivery(delivery), Shot(shot))
-                        except ValueError:
-                            outcome = resolve_matchup(Delivery.YORKER, Shot.DUCK)
+                            consume_delivery(room.bowler_inventory, delivery)
+                        except ValueError as err:
+                            await send_error(websocket, "delivery_exhausted", str(err))
+                            continue
+
+                        outcome = resolve_matchup(DeliveryType(delivery), BatsmanIntent(shot))
 
                         room.round_number += 1
                         room.runs += outcome.runs
@@ -355,6 +453,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             "runs_scored": outcome.runs,
                             "wicket": outcome.wicket,
                             "wide": outcome.wide,
+                            "bowler_inventory": dict(room.bowler_inventory),
                             "scoreboard": public_score(room),
                         }
 
@@ -379,6 +478,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                                     "target_score": room.target_score,
                                     "current_innings": room.current_innings,
                                     "role": p.role,
+                                    "current_phase": room.current_phase,
+                                    "bowler_inventory": dict(room.bowler_inventory),
                                     "scoreboard": public_score(room),
                                 },
                             )
@@ -392,6 +493,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         {
                             "type": "match_over",
                             "winner": room.winner,
+                            "current_phase": room.current_phase,
                             "scoreboard": public_score(room),
                         },
                     )

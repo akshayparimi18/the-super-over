@@ -2,8 +2,26 @@ import { useEffect, useRef, useState } from "react";
 import "./styles.css";
 
 type Role = "bowler" | "batsman";
-type Delivery = "YORKER" | "BOUNCER" | "SPIN";
-type Shot = "HELICOPTER" | "SWEEP" | "DUCK";
+type BowlerProfile = "FAST" | "SPIN";
+
+export type DeliveryType =
+  | "YORKER"
+  | "BOUNCER"
+  | "IN_SWINGER"
+  | "OUT_SWINGER"
+  | "OFF_BREAK"
+  | "LEG_BREAK"
+  | "GOOGLY"
+  | "TOP_SPIN"
+  | "HALF_VOLLEY";
+
+export type BatsmanIntent =
+  | "DEFEND_0"
+  | "PUSH_1"
+  | "PUSH_2"
+  | "PUSH_3"
+  | "HIT_4"
+  | "SLOG_6";
 
 type Scoreboard = {
   runs: number;
@@ -16,15 +34,19 @@ type Scoreboard = {
   current_innings?: number;
   target_score?: number | null;
   winner?: string | null;
+  current_phase?: string;
+  bowler_profile?: string | null;
+  bowler_inventory?: Record<string, number>;
 };
 
 type RoundResult = {
   round_number: number;
-  delivery: Delivery;
-  shot: Shot;
+  delivery: string;
+  shot: string;
   runs_scored: number;
   wicket: boolean;
   wide: boolean;
+  bowler_inventory?: Record<string, number>;
   scoreboard: Scoreboard;
   status?: string;
 };
@@ -39,8 +61,8 @@ type ServerMessage = {
   scoreboard?: Scoreboard;
   your_move_locked?: boolean;
   round_number?: number;
-  delivery?: Delivery;
-  shot?: Shot;
+  delivery?: string;
+  shot?: string;
   runs_scored?: number;
   wicket?: boolean;
   wide?: boolean;
@@ -48,18 +70,30 @@ type ServerMessage = {
   current_innings?: number;
   winner?: string | null;
   status?: string;
+  current_phase?: string;
+  bowler_profile?: BowlerProfile;
+  bowler_inventory?: Record<string, number>;
 };
 
-const deliveries: { move: Delivery; label: string; emoji: string }[] = [
-  { move: "YORKER", label: "Yorker", emoji: "🎯" },
-  { move: "BOUNCER", label: "Bouncer", emoji: "🔥" },
-  { move: "SPIN", label: "Spin", emoji: "🌀" },
-];
+const deliveryMetadata: Record<string, { label: string; emoji: string }> = {
+  YORKER: { label: "Yorker", emoji: "🎯" },
+  BOUNCER: { label: "Bouncer", emoji: "🔥" },
+  IN_SWINGER: { label: "In-Swinger", emoji: "↩️" },
+  OUT_SWINGER: { label: "Out-Swinger", emoji: "↪️" },
+  OFF_BREAK: { label: "Off-Break", emoji: "🌀" },
+  LEG_BREAK: { label: "Leg-Break", emoji: "💫" },
+  GOOGLY: { label: "Googly", emoji: "🔮" },
+  TOP_SPIN: { label: "Top-Spin", emoji: "⚡" },
+  HALF_VOLLEY: { label: "Half-Volley", emoji: "💥" },
+};
 
-const shots: { move: Shot; label: string; emoji: string }[] = [
-  { move: "HELICOPTER", label: "Helicopter", emoji: "🚁" },
-  { move: "SWEEP", label: "Sweep", emoji: "🏏" },
-  { move: "DUCK", label: "Duck", emoji: "🦆" },
+const batsmanIntents = [
+  { move: "DEFEND_0", label: "Defend", runs: "0 Runs", emoji: "🛡️" },
+  { move: "PUSH_1", label: "Push 1", runs: "1 Run", emoji: "⚡" },
+  { move: "PUSH_2", label: "Push 2", runs: "2 Runs", emoji: "🏃" },
+  { move: "PUSH_3", label: "Push 3", runs: "3 Runs", emoji: "💨" },
+  { move: "HIT_4", label: "Hit 4", runs: "4 Runs", emoji: "🏏" },
+  { move: "SLOG_6", label: "Slog 6", runs: "6 Runs", emoji: "🚀" },
 ];
 
 const initialScore: Scoreboard = {
@@ -73,6 +107,9 @@ const initialScore: Scoreboard = {
   current_innings: 1,
   target_score: null,
   winner: null,
+  current_phase: "WAITING_FOR_PLAYERS",
+  bowler_profile: null,
+  bowler_inventory: {},
 };
 
 export default function App() {
@@ -88,6 +125,9 @@ export default function App() {
   const [result, setResult] = useState<RoundResult | null>(null);
   const [isInningsBreak, setIsInningsBreak] = useState(false);
   const [breakCountdown, setBreakCountdown] = useState(5);
+  const [currentPhase, setCurrentPhase] = useState("WAITING_FOR_PLAYERS");
+  const [bowlerProfile, setBowlerProfile] = useState<string | null>(null);
+  const [bowlerInventory, setBowlerInventory] = useState<Record<string, number>>({});
   const [status, setStatus] = useState("Create a room or join with a code.");
   const [error, setError] = useState("");
 
@@ -101,7 +141,7 @@ export default function App() {
     if (!isInningsBreak) return;
     if (breakCountdown <= 0) {
       setIsInningsBreak(false);
-      setStatus("Second Innings! Choose your move.");
+      setStatus("Second Innings! Bowler, choose your profile.");
       return;
     }
     const timer = setTimeout(() => {
@@ -133,7 +173,6 @@ export default function App() {
     setStatus("Connecting to the game server...");
 
     const socket = new WebSocket("ws://127.0.0.1:8000/ws");
-   
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -157,6 +196,10 @@ export default function App() {
           setRole(data.role ?? null);
           setPlayersConnected(data.players_connected ?? 1);
           setScore(data.scoreboard ?? initialScore);
+          if (data.current_phase) setCurrentPhase(data.current_phase);
+          if (data.scoreboard?.bowler_profile) setBowlerProfile(data.scoreboard.bowler_profile);
+          if (data.scoreboard?.bowler_inventory) setBowlerInventory(data.scoreboard.bowler_inventory);
+
           setStatus(
             data.type === "room_created"
               ? "Room created. Share the code with your opponent."
@@ -167,7 +210,31 @@ export default function App() {
 
         case "player_joined": {
           setPlayersConnected(data.players_connected ?? 2);
-          setStatus("Both players are connected. Get ready!");
+          if (data.current_phase) setCurrentPhase(data.current_phase);
+          if (data.scoreboard) setScore(data.scoreboard);
+          setStatus(
+            role === "bowler"
+              ? "Opponent connected! Select your bowling profile."
+              : "Both players connected. Waiting for bowler to pick profile."
+          );
+          break;
+        }
+
+        case "phase_change": {
+          if (data.current_phase) setCurrentPhase(data.current_phase);
+          if (data.scoreboard) setScore(data.scoreboard);
+          if (data.message) setStatus(data.message);
+          break;
+        }
+
+        case "profile_selected": {
+          if (data.bowler_profile) setBowlerProfile(data.bowler_profile);
+          if (data.bowler_inventory) setBowlerInventory(data.bowler_inventory);
+          if (data.current_phase) setCurrentPhase(data.current_phase);
+          if (data.scoreboard) setScore(data.scoreboard);
+          setStatus(
+            `Bowler selected ${data.bowler_profile} profile! Choose your move.`
+          );
           break;
         }
 
@@ -175,8 +242,8 @@ export default function App() {
           setMoveLocked(true);
           setStatus(
             data.waiting_for_opponent
-              ? "Your move is locked. Waiting for your opponent..."
-              : "Move locked. Waiting for the round result..."
+              ? "Your move is locked. Waiting for opponent..."
+              : "Move locked. Resolving showdown..."
           );
           break;
         }
@@ -192,6 +259,8 @@ export default function App() {
             break;
           }
 
+          if (data.bowler_inventory) setBowlerInventory(data.bowler_inventory);
+
           setResult({
             round_number: data.round_number ?? 0,
             delivery: data.delivery,
@@ -199,6 +268,7 @@ export default function App() {
             runs_scored: data.runs_scored,
             wicket: data.wicket ?? false,
             wide: data.wide ?? false,
+            bowler_inventory: data.bowler_inventory,
             scoreboard: data.scoreboard,
             status: data.status,
           });
@@ -223,12 +293,15 @@ export default function App() {
         case "innings_break": {
           if (data.role) setRole(data.role);
           if (data.scoreboard) setScore(data.scoreboard);
+          setCurrentPhase("SELECT_PROFILE");
+          setBowlerProfile(null);
+          setBowlerInventory({});
           setMoveLocked(false);
           setResult(null);
           setIsInningsBreak(true);
           setBreakCountdown(5);
           setStatus(
-            `Innings 1 Over! Target to chase: ${
+            `Innings 1 Over! Target: ${
               data.target_score ?? data.scoreboard?.target_score ?? "N/A"
             } runs.`
           );
@@ -237,6 +310,7 @@ export default function App() {
 
         case "match_over": {
           if (data.scoreboard) setScore(data.scoreboard);
+          setCurrentPhase("MATCH_OVER");
           setMoveLocked(false);
           const winnerText = data.winner ?? data.scoreboard?.winner;
           setStatus(
@@ -253,6 +327,9 @@ export default function App() {
           setPlayersConnected(data.players_connected ?? 1);
           setScore(data.scoreboard ?? initialScore);
           setMoveLocked(data.your_move_locked ?? false);
+          if (data.current_phase) setCurrentPhase(data.current_phase);
+          if (data.bowler_profile) setBowlerProfile(data.bowler_profile);
+          if (data.bowler_inventory) setBowlerInventory(data.bowler_inventory);
           break;
         }
 
@@ -268,6 +345,9 @@ export default function App() {
           setRole(null);
           setMoveLocked(false);
           setIsInningsBreak(false);
+          setCurrentPhase("WAITING_FOR_PLAYERS");
+          setBowlerProfile(null);
+          setBowlerInventory({});
           socket.close();
           break;
         }
@@ -297,6 +377,9 @@ export default function App() {
     setMoveLocked(false);
     setIsInningsBreak(false);
     setBreakCountdown(5);
+    setCurrentPhase("WAITING_FOR_PLAYERS");
+    setBowlerProfile(null);
+    setBowlerInventory({});
     connectAndSend({ type: "create_room" });
   }
 
@@ -314,11 +397,24 @@ export default function App() {
     setMoveLocked(false);
     setIsInningsBreak(false);
     setBreakCountdown(5);
+    setCurrentPhase("WAITING_FOR_PLAYERS");
+    setBowlerProfile(null);
+    setBowlerInventory({});
     connectAndSend({ type: "join_room", room_code: code });
   }
 
-  function submitMove(move: Delivery | Shot) {
+  function selectProfile(profile: BowlerProfile) {
+    if (role !== "bowler") return;
+    setError("");
+    send({ type: "select_profile", payload: { profile } });
+  }
+
+  function submitMove(move: string) {
     if (!role || moveLocked || isInningsBreak || score.winner) return;
+    if (currentPhase === "SELECT_PROFILE") {
+      setError("Bowler must select their profile first.");
+      return;
+    }
     if (score.current_innings === 2 && score.innings_finished) return;
     if (playersConnected !== 2) {
       setError("Wait until both players are connected.");
@@ -340,6 +436,9 @@ export default function App() {
     setMoveLocked(false);
     setIsInningsBreak(false);
     setBreakCountdown(5);
+    setCurrentPhase("WAITING_FOR_PLAYERS");
+    setBowlerProfile(null);
+    setBowlerInventory({});
     setStatus("You left the room. Create or join another room.");
   }
 
@@ -356,12 +455,11 @@ export default function App() {
     connected &&
     Boolean(roomCode) &&
     playersConnected === 2 &&
+    currentPhase === "PLAYING" &&
     !moveLocked &&
     !isInningsBreak &&
     !score.winner &&
     !(score.current_innings === 2 && score.innings_finished);
-
-  const currentOptions = role === "bowler" ? deliveries : shots;
 
   return (
     <main className="app-shell">
@@ -376,15 +474,14 @@ export default function App() {
       </header>
 
       <section className="hero">
-        <p className="eyebrow">REAL-TIME · TWO PLAYERS · ONE OVER</p>
+        <p className="eyebrow">INVENTORY & INTENT · TWO PLAYERS · ONE OVER</p>
         <h1>
           Every ball.
           <br />
           <span>Changes everything.</span>
         </h1>
         <p className="hero-copy">
-          Pick your move in secret. Lock it in. Let the server decide the
-          showdown.
+          Pick your profile. Manage your inventory. Execute your intent.
         </p>
       </section>
 
@@ -393,7 +490,7 @@ export default function App() {
           <div>
             <p className="section-kicker">THE PAVILION</p>
             <h2>Ready to play?</h2>
-            <p className="muted">No account. No downloads. Just cricket.</p>
+            <p className="muted">No account. No downloads. Just pure cricket strategy.</p>
           </div>
 
           <button className="primary-button" onClick={createRoom}>
@@ -454,6 +551,7 @@ export default function App() {
             <div className="score-main">
               <span className="section-kicker">
                 INNINGS {score.current_innings ?? 1} · {role === "bowler" ? "BOWLING" : "BATTING"}
+                {bowlerProfile ? ` (${bowlerProfile})` : ""}
               </span>
               <div className="total-score">
                 {score.runs}
@@ -512,48 +610,137 @@ export default function App() {
                     : "The target score was defended successfully!"}
               </p>
             </section>
+          ) : currentPhase === "SELECT_PROFILE" && playersConnected === 2 ? (
+            /* Profile Selection Screen */
+            <section className="game-panel panel profile-selection-panel">
+              <p className="section-kicker">PHASE I · ARSENAL SELECTION</p>
+              <h2>
+                {role === "bowler"
+                  ? "Select Your Bowler Profile"
+                  : "Waiting for Bowler..."}
+              </h2>
+              <p className="muted">
+                {role === "bowler"
+                  ? "Choose Fast or Spin. Each profile gives you a strategic delivery inventory for the over."
+                  : "The bowler is choosing their delivery arsenal (Fast or Spin). Pad up!"}
+              </p>
+
+              {role === "bowler" ? (
+                <div className="profile-grid">
+                  <div className="profile-card">
+                    <div className="profile-icon">⚡</div>
+                    <h3>Fast Bowler</h3>
+                    <p className="profile-desc">Pace, swing & deadly bouncers</p>
+                    <ul className="profile-inventory-list">
+                      <li>🎯 1 Yorker</li>
+                      <li>🔥 1 Bouncer</li>
+                      <li>↩️ 1 In-Swinger</li>
+                      <li>↪️ 1 Out-Swinger</li>
+                      <li>💥 2 Half-Volleys</li>
+                    </ul>
+                    <button
+                      className="primary-button"
+                      onClick={() => selectProfile("FAST")}
+                    >
+                      Select Fast Bowler ➔
+                    </button>
+                  </div>
+
+                  <div className="profile-card">
+                    <div className="profile-icon">🌀</div>
+                    <h3>Spin Bowler</h3>
+                    <p className="profile-desc">Deception, turn & variation</p>
+                    <ul className="profile-inventory-list">
+                      <li>🌀 1 Off-Break</li>
+                      <li>💫 1 Leg-Break</li>
+                      <li>🔮 1 Googly</li>
+                      <li>⚡ 1 Top-Spin</li>
+                      <li>💥 2 Half-Volleys</li>
+                    </ul>
+                    <button
+                      className="primary-button"
+                      onClick={() => selectProfile("SPIN")}
+                    >
+                      Select Spin Bowler ➔
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="waiting-banner">
+                  <span className="pulse-dot" />
+                  WAITING FOR BOWLER TO SELECT PROFILE...
+                </div>
+              )}
+            </section>
           ) : (
+            /* Active Game Play Panel (Moves Grid) */
             <section className="game-panel panel">
               <p className="section-kicker">
                 {score.current_innings === 2 && score.innings_finished
                   ? "INNINGS COMPLETE"
-                  : `INNINGS ${score.current_innings ?? 1} · NEXT BALL`}
+                  : `INNINGS ${score.current_innings ?? 1} · BALL ${score.legal_balls + 1} OF 6`}
               </p>
 
               <h2>
                 {score.current_innings === 2 && score.innings_finished
                   ? "That's the match!"
                   : role === "bowler"
-                    ? "Choose your delivery"
-                    : "Choose your shot"}
+                    ? `Choose your delivery (${bowlerProfile || "Arsenal"})`
+                    : "Choose your batsman intent"}
               </h2>
 
               <p className="muted">
                 {playersConnected !== 2
                   ? "Waiting for the other player to join..."
-                  : score.current_innings === 2 && score.innings_finished
-                    ? "The match has ended."
-                    : moveLocked
-                      ? "Your move is hidden. Waiting for the reveal..."
+                  : moveLocked
+                    ? "Your move is hidden. Waiting for the reveal..."
+                    : role === "bowler"
+                      ? "Manage your delivery stock wisely across the 6 balls."
                       : score.target_score
-                        ? `Target: ${score.target_score} runs. Pick your choice.`
-                        : "Your opponent cannot see your choice."}
+                        ? `Target: ${score.target_score} runs. Pick your intent.`
+                        : "Balance your risk: Defense protects wickets, Slog aims for maximums."}
               </p>
 
               {!(score.current_innings === 2 && score.innings_finished) && (
                 <div className="move-grid">
-                  {currentOptions.map((option) => (
-                    <button
-                      className="move-card"
-                      key={option.move}
-                      disabled={!canPlay}
-                      onClick={() => submitMove(option.move)}
-                    >
-                      <span className="move-emoji">{option.emoji}</span>
-                      <span className="move-label">{option.label}</span>
-                      <span className="move-action">SELECT ↗</span>
-                    </button>
-                  ))}
+                  {role === "bowler"
+                    ? Object.entries(bowlerInventory).map(([moveKey, count]) => {
+                        const meta = deliveryMetadata[moveKey] || {
+                          label: moveKey,
+                          emoji: "🏏",
+                        };
+                        const isExhausted = count <= 0;
+                        return (
+                          <button
+                            className={`move-card ${isExhausted ? "exhausted" : ""}`}
+                            key={moveKey}
+                            disabled={!canPlay || isExhausted}
+                            onClick={() => submitMove(moveKey)}
+                          >
+                            <span className="move-emoji">{meta.emoji}</span>
+                            <span className="move-label">{meta.label}</span>
+                            <span
+                              className={`move-inventory-badge ${
+                                isExhausted ? "empty" : ""
+                              }`}
+                            >
+                              {count} left
+                            </span>
+                          </button>
+                        );
+                      })
+                    : batsmanIntents.map((intent) => (
+                        <button
+                          className="move-card intent-card"
+                          key={intent.move}
+                          disabled={!canPlay}
+                          onClick={() => submitMove(intent.move)}
+                        >
+                          <span className="move-emoji">{intent.emoji}</span>
+                          <span className="move-label">{intent.label}</span>
+                          <span className="move-action">{intent.runs}</span>
+                        </button>
+                      ))}
                 </div>
               )}
 
@@ -573,15 +760,19 @@ export default function App() {
               </p>
               <div className="matchup">
                 <div className="matchup-move">
-                  <span>🎯</span>
-                  <strong>{result.delivery}</strong>
-                  <small>BOWLER</small>
+                  <span>{deliveryMetadata[result.delivery]?.emoji || "🎯"}</span>
+                  <strong>{deliveryMetadata[result.delivery]?.label || result.delivery}</strong>
+                  <small>DELIVERY</small>
                 </div>
                 <span className="versus">VS</span>
                 <div className="matchup-move">
-                  <span>🏏</span>
-                  <strong>{result.shot}</strong>
-                  <small>BATSMAN</small>
+                  <span>
+                    {batsmanIntents.find((i) => i.move === result.shot)?.emoji || "🏏"}
+                  </span>
+                  <strong>
+                    {batsmanIntents.find((i) => i.move === result.shot)?.label || result.shot}
+                  </strong>
+                  <small>INTENT</small>
                 </div>
               </div>
 
@@ -591,16 +782,16 @@ export default function App() {
                   : result.wide
                     ? "WIDE — +1 RUN"
                     : result.runs_scored === 0
-                      ? "DOT BALL"
+                      ? "DOT BALL (0 RUNS)"
                       : `${result.runs_scored} RUN${result.runs_scored === 1 ? "" : "S"}`}
               </div>
 
               <p className="muted">
                 {result.wide
-                  ? "The wide adds a run but does not count as a legal ball."
+                  ? "Wide delivery adds 1 run."
                   : result.wicket
-                    ? "The batting side has lost a wicket."
-                    : "Score updated on both screens."}
+                    ? "A wicket has fallen!"
+                    : `${result.runs_scored} run${result.runs_scored === 1 ? "" : "s"} added to the scoreboard.`}
               </p>
             </section>
           )}
@@ -614,7 +805,7 @@ export default function App() {
 
       <footer className="footer">
         <span>THE SUPER OVER</span>
-        <span>ONE ROOM · TWO PLAYERS · PURE CRICKET</span>
+        <span>INVENTORY & INTENT · REAL-TIME CRICKET SHOWDOWN</span>
       </footer>
     </main>
   );
