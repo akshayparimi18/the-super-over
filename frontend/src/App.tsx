@@ -172,7 +172,8 @@ export default function App() {
     setError("");
     setStatus("Connecting to the game server...");
 
-    const socket = new WebSocket("ws://127.0.0.1:8000/ws");
+    const wsUrl = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
+    const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
 
     socket.onopen = () => {
