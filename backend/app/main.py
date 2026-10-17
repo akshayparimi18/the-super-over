@@ -1,8 +1,10 @@
 import asyncio
+import os
 import secrets
 import string
 from dataclasses import dataclass, field
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 from app.rules import (
     BatsmanIntent,
@@ -16,6 +18,22 @@ from app.rules import (
 from app.schemas import ClientMessage, GameState, MovePayload, ProfilePayload
 
 app = FastAPI(title="The Super Over API")
+
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 ROOM_CODE_LENGTH = 6
 LEGAL_BALLS_PER_INNINGS = 6
@@ -164,6 +182,11 @@ async def remove_player(room: Room, player_id: str) -> None:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    origin = websocket.headers.get("origin")
+    if not origin or origin not in FRONTEND_ORIGINS:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     player_id = secrets.token_hex(8)
     current_room_code: str | None = None
