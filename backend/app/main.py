@@ -22,27 +22,32 @@ app = FastAPI(title="The Super Over API")
 FRONTEND_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
-        "FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        "FRONTEND_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,https://the-super-over-five.vercel.app",
     ).split(",")
     if origin.strip()
 ]
 
 
 def is_allowed_origin(origin: str | None) -> bool:
-    """Validate incoming origin against FRONTEND_ORIGINS with trailing-slash and wildcard tolerance."""
+    """Validate incoming origin against FRONTEND_ORIGINS with trailing-slash, Vercel domains, and wildcard tolerance."""
     if not origin:
         return False
     if "*" in FRONTEND_ORIGINS:
         return True
     norm_origin = origin.rstrip("/")
+    if norm_origin.startswith("https://") and norm_origin.endswith(".vercel.app"):
+        return True
     allowed = {o.rstrip("/") for o in FRONTEND_ORIGINS}
     return norm_origin in allowed
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
