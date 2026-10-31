@@ -112,6 +112,29 @@ const initialScore: Scoreboard = {
   bowler_inventory: {},
 };
 
+function getWinnerDisplay(winner?: string | null): { title: string; subtitle: string } {
+  if (!winner) return { title: "Match Over!", subtitle: "Game concluded." };
+  if (winner === "Tie" || winner.includes("Tied") || winner.includes("Tie")) {
+    return {
+      title: "🤝 MATCH TIED!",
+      subtitle: "Both teams finished level on runs! Super Over madness!",
+    };
+  }
+  if (winner === "Team 2" || winner.includes("Chased")) {
+    return {
+      title: "🏆 TARGET CHASED!",
+      subtitle: "Innings 2 Batting Team chased down the target and wins!",
+    };
+  }
+  if (winner === "Team 1" || winner.includes("Defended")) {
+    return {
+      title: "🛡️ TARGET DEFENDED!",
+      subtitle: "Innings 1 Batting Team successfully defended the target and wins!",
+    };
+  }
+  return { title: `🏆 ${winner} WINS!`, subtitle: `${winner} won the match!` };
+}
+
 export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -298,7 +321,8 @@ export default function App() {
           setBowlerProfile(null);
           setBowlerInventory({});
           setMoveLocked(false);
-          setResult(null);
+          // Keep final ball result visible during innings break!
+          // setResult(null);
           setIsInningsBreak(true);
           setBreakCountdown(5);
           setStatus(
@@ -314,11 +338,8 @@ export default function App() {
           setCurrentPhase("MATCH_OVER");
           setMoveLocked(false);
           const winnerText = data.winner ?? data.scoreboard?.winner;
-          setStatus(
-            winnerText === "Tie"
-              ? "Match Over! It's a Tie!"
-              : `Match Over! ${winnerText ?? "Game concluded"} wins!`
-          );
+          const winnerInfo = getWinnerDisplay(winnerText);
+          setStatus(`Match Over! ${winnerInfo.title}`);
           break;
         }
 
@@ -601,14 +622,10 @@ export default function App() {
               <p className="section-kicker">MATCH OVER</p>
               <h2>The Super Over is complete!</h2>
               <div className="result-highlight winner-highlight">
-                {score.winner === "Tie" ? "🤝 MATCH TIED!" : `🏆 ${score.winner} WINS!`}
+                {getWinnerDisplay(score.winner).title}
               </div>
               <p className="muted">
-                {score.winner === "Tie"
-                  ? "Both teams finished level on runs!"
-                  : score.winner === "Team 2"
-                    ? "The target was chased down successfully!"
-                    : "The target score was defended successfully!"}
+                {getWinnerDisplay(score.winner).subtitle}
               </p>
             </section>
           ) : currentPhase === "SELECT_PROFILE" && playersConnected === 2 ? (
