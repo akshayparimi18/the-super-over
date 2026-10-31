@@ -197,6 +197,13 @@ export default function App() {
 
     const rawWsUrl: string = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
     let wsUrl = rawWsUrl.trim();
+    // Strip accidental markdown link formatting e.g. wss://[...](https://...)
+    const markdownMatch = wsUrl.match(/\((https?:\/\/[^\s)]+|wss?:\/\/[^\s)]+)\)/);
+    if (markdownMatch) {
+      wsUrl = markdownMatch[1];
+    } else {
+      wsUrl = wsUrl.replace(/[\[\]]/g, "");
+    }
     if (wsUrl.startsWith("http://")) {
       wsUrl = "ws://" + wsUrl.slice(7);
     } else if (wsUrl.startsWith("https://")) {
