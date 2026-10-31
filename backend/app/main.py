@@ -306,6 +306,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     continue
 
                 async with room.lock:
+                    if room.closed:
+                        await send_error(websocket, "room_not_found", "Room is closed.")
+                        continue
+
                     player = room.players.get(player_id)
                     if not player:
                         continue
@@ -369,6 +373,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 innings_status = None
 
                 async with room.lock:
+                    if room.closed:
+                        await send_error(websocket, "room_not_found", "Room is closed.")
+                        continue
+
                     player = room.players.get(player_id)
                     if not player or len(room.players) != 2:
                         continue
@@ -467,6 +475,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             room.wickets += 1
                         if not outcome.wide:
                             room.legal_balls += 1
+                        else:
+                            # Wide does not count towards legal balls; restore ball to bowler inventory
+                            room.bowler_inventory[delivery] = room.bowler_inventory.get(delivery, 0) + 1
 
                         result_data = {
                             "type": "round_result",

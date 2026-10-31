@@ -364,27 +364,16 @@ def check_innings_state(room: Any) -> str | None:
 def resolve_matchup(
     delivery: DeliveryType | str,
     shot: BatsmanIntent | str,
-    room: Any = None,
-    bowler_inventory: dict[str, int] | None = None,
 ) -> Outcome:
-    """Return the outcome for a delivery and batsman intent pair using weighted probabilities."""
+    """Return the outcome for a delivery and batsman intent pair using weighted probabilities (pure function)."""
     d = DeliveryType(delivery) if not isinstance(delivery, DeliveryType) else delivery
     s = BatsmanIntent(shot) if not isinstance(shot, BatsmanIntent) else shot
-
-    if bowler_inventory is not None:
-        consume_delivery(bowler_inventory, d)
-    elif room is not None and hasattr(room, "bowler_inventory") and room.bowler_inventory:
-        consume_delivery(room.bowler_inventory, d)
 
     outcomes, weights = MATCHUP_RULES[(d, s)]
     selected = random.choices(outcomes, weights=weights, k=1)[0]
 
-    status = None
-    if room is not None:
-        status = check_innings_state(room)
     return Outcome(
         runs=selected.runs,
         wicket=selected.wicket,
         wide=selected.wide,
-        status=status,
     )
