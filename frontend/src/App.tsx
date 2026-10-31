@@ -195,7 +195,16 @@ export default function App() {
     setError("");
     setStatus("Connecting to the game server...");
 
-    const wsUrl = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
+    const rawWsUrl: string = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
+    let wsUrl = rawWsUrl.trim();
+    if (wsUrl.startsWith("http://")) {
+      wsUrl = "ws://" + wsUrl.slice(7);
+    } else if (wsUrl.startsWith("https://")) {
+      wsUrl = "wss://" + wsUrl.slice(8);
+    }
+    if (!wsUrl.endsWith("/ws")) {
+      wsUrl = wsUrl.replace(/\/+$/, "") + "/ws";
+    }
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
 

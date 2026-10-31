@@ -27,6 +27,17 @@ FRONTEND_ORIGINS = [
     if origin.strip()
 ]
 
+
+def is_allowed_origin(origin: str | None) -> bool:
+    """Validate incoming origin against FRONTEND_ORIGINS with trailing-slash and wildcard tolerance."""
+    if not origin:
+        return False
+    if "*" in FRONTEND_ORIGINS:
+        return True
+    norm_origin = origin.rstrip("/")
+    allowed = {o.rstrip("/") for o in FRONTEND_ORIGINS}
+    return norm_origin in allowed
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
@@ -183,7 +194,7 @@ async def remove_player(room: Room, player_id: str) -> None:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     origin = websocket.headers.get("origin")
-    if not origin or origin not in FRONTEND_ORIGINS:
+    if not is_allowed_origin(origin):
         await websocket.close(code=1008)
         return
 
