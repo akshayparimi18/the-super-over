@@ -112,27 +112,45 @@ const initialScore: Scoreboard = {
   bowler_inventory: {},
 };
 
-function getWinnerDisplay(winner?: string | null): { title: string; subtitle: string } {
-  if (!winner) return { title: "Match Over!", subtitle: "Game concluded." };
+function getWinnerDisplay(
+  winner?: string | null,
+  role?: Role | null
+): { title: string; subtitle: string; isUserWinner: boolean | null } {
+  if (!winner) {
+    return { title: "Match Over!", subtitle: "Game concluded.", isUserWinner: null };
+  }
+
   if (winner === "Tie" || winner.includes("Tied") || winner.includes("Tie")) {
     return {
       title: "🤝 MATCH TIED!",
       subtitle: "Both teams finished level on runs! Super Over madness!",
+      isUserWinner: null,
     };
   }
-  if (winner === "Team 2" || winner.includes("Chased")) {
+
+  // In Innings 2:
+  // "Team 2" / "Chased" means Innings 2 BATSMAN won!
+  // "Team 1" / "Defended" means Innings 2 BOWLER won!
+  const isChased = winner === "Team 2" || winner.includes("Chased");
+  const didIWin = isChased ? role === "batsman" : role === "bowler";
+
+  if (didIWin) {
     return {
-      title: "🏆 TARGET CHASED!",
-      subtitle: "Innings 2 Batting Team chased down the target and wins!",
+      title: "🎉 YOU WON! 🏆",
+      subtitle: isChased
+        ? "Sensational run chase! You chased down the target and won the Super Over!"
+        : "Ice in your veins! You successfully defended the target and won the Super Over!",
+      isUserWinner: true,
     };
-  }
-  if (winner === "Team 1" || winner.includes("Defended")) {
+  } else {
     return {
-      title: "🛡️ TARGET DEFENDED!",
-      subtitle: "Innings 1 Batting Team successfully defended the target and wins!",
+      title: "💔 YOU LOST!",
+      subtitle: isChased
+        ? "The opponent successfully chased down the target."
+        : "You were unable to chase down the target score.",
+      isUserWinner: false,
     };
   }
-  return { title: `🏆 ${winner} WINS!`, subtitle: `${winner} won the match!` };
 }
 
 export default function App() {
@@ -354,7 +372,7 @@ export default function App() {
           setCurrentPhase("MATCH_OVER");
           setMoveLocked(false);
           const winnerText = data.winner ?? data.scoreboard?.winner;
-          const winnerInfo = getWinnerDisplay(winnerText);
+          const winnerInfo = getWinnerDisplay(winnerText, role);
           setStatus(`Match Over! ${winnerInfo.title}`);
           break;
         }
@@ -637,12 +655,28 @@ export default function App() {
             <section className="panel match-over-panel">
               <p className="section-kicker">MATCH OVER</p>
               <h2>The Super Over is complete!</h2>
-              <div className="result-highlight winner-highlight">
-                {getWinnerDisplay(score.winner).title}
-              </div>
-              <p className="muted">
-                {getWinnerDisplay(score.winner).subtitle}
-              </p>
+              {(() => {
+                const outcome = getWinnerDisplay(score.winner, role);
+                return (
+                  <>
+                    <div
+                      className={`result-highlight winner-highlight ${
+                        outcome.isUserWinner === false ? "lost" : ""
+                      }`}
+                    >
+                      {outcome.title}
+                    </div>
+                    <p className="muted">{outcome.subtitle}</p>
+                  </>
+                );
+              })()}
+              <button
+                className="primary-button"
+                onClick={leaveRoom}
+                style={{ marginTop: "1.75rem" }}
+              >
+                🏏 Play Another Match
+              </button>
             </section>
           ) : currentPhase === "SELECT_PROFILE" && playersConnected === 2 ? (
             /* Profile Selection Screen */

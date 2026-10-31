@@ -846,6 +846,11 @@ h2 {
   text-shadow: 0 0 28px var(--accent-glow);
 }
 
+.winner-highlight.lost {
+  color: var(--crimson);
+  text-shadow: 0 0 28px var(--crimson-glow);
+}
+
 .innings-role-desc {
   font-size: 1.05rem;
   margin-bottom: 1.25rem;
